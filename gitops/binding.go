@@ -66,11 +66,14 @@ func NewBindingComponents(components []applicationapiv1alpha1.Component) *[]appl
 }
 
 func HaveBindingsFailed(snapshotEnvironmentBinding *applicationapiv1alpha1.SnapshotEnvironmentBinding) bool {
-	bindingStatus := meta.FindStatusCondition(snapshotEnvironmentBinding.Status.ComponentDeploymentConditions, BindingErrorOccurredStatusConditionType)
-	if bindingStatus == nil {
-		return false
-	}
-	return bindingStatus.Status == metav1.ConditionTrue
+	return true
+	/*
+		bindingStatus := meta.FindStatusCondition(snapshotEnvironmentBinding.Status.ComponentDeploymentConditions, BindingErrorOccurredStatusConditionType)
+		if bindingStatus == nil {
+			return false
+		}
+		return bindingStatus.Status == metav1.ConditionTrue
+	*/
 }
 
 // hasDeploymentSucceeded returns a boolean that is only true if the first passed object

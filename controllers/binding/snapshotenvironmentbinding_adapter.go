@@ -109,10 +109,6 @@ func (a *Adapter) EnsureIntegrationTestPipelineForScenarioExists() (controller.O
 // SnapshotEnvironmentBinding are cleaned up.
 func (a *Adapter) EnsureEphemeralEnvironmentsCleanedUp() (controller.OperationResult, error) {
 
-	if !gitops.HaveBindingsFailed(a.snapshotEnvironmentBinding) {
-		return controller.ContinueProcessing()
-	}
-
 	// mark snapshot as failed
 	snapshotErrorMessage := "Encountered issue deploying snapshot on ephemeral environments: " +
 		meta.FindStatusCondition(a.snapshotEnvironmentBinding.Status.ComponentDeploymentConditions, "ErrorOccurred").Message

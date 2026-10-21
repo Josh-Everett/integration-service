@@ -179,4 +179,7 @@ var _ = Describe("ComponentController", Ordered, func() {
 		err := setupControllerWithManager(manager, componentReconciler)
 		Expect(err).NotTo(HaveOccurred())
 	})
+
+	// STONEINTG-1799: planned reconcile behaviour; filled in by the next commit.
+	PIt("creates the account and binding for a Component with an Application, after the finalizer and before cleanup", func() {})
 })

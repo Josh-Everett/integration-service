@@ -181,4 +181,12 @@ var _ = Describe("Component Adapter", Ordered, func() {
 		}).WithTimeout(time.Second * 30).Should(Succeed())
 	})
 
+	// STONEINTG-1799: planned behaviour of EnsureComponentServiceAccountCreated; filled in by the next commit.
+	When("ensuring the per-component integration pipeline ServiceAccount", func() {
+		PIt("creates the ServiceAccount and the RoleBinding, both with a controller owner reference to the Component", func() {})
+		PIt("binds the account to the its-pipeline-runner ClusterRole with the account as the only subject", func() {})
+		PIt("is idempotent on a second call and keeps a single owner reference", func() {})
+		PIt("creates nothing when the Component is marked for deletion", func() {})
+	})
+
 })

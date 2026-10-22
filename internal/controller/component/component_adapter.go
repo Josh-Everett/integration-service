@@ -71,6 +71,23 @@ func (a *Adapter) EnsureComponentHasFinalizer() (controller.OperationResult, err
 	return controller.ContinueProcessing()
 }
 
+// EnsureComponentServiceAccountCreated is an operation that will ensure the per-component
+// integration pipeline ServiceAccount its-pipeline-<component> and its RoleBinding to the
+// its-pipeline-runner ClusterRole exist for the Component (STONEINTG-1799). Nothing is created for a
+// Component that is being deleted.
+func (a *Adapter) EnsureComponentServiceAccountCreated() (controller.OperationResult, error) {
+	if isComponentMarkedForDeletion(a.component) {
+		return controller.ContinueProcessing()
+	}
+
+	if err := ensureIntegrationPipelineServiceAccount(a.context, a.client, a.logger, a.component); err != nil {
+		a.logger.Error(err, "Failed to ensure the integration pipeline ServiceAccount for the component", "component.Name", a.component.Name)
+		return controller.RequeueWithError(err)
+	}
+
+	return controller.ContinueProcessing()
+}
+
 // EnsureComponentIsCleanedUp is an operation that will ensure components
 // marked for deletion have a snapshot created without said component
 func (a *Adapter) EnsureComponentIsCleanedUp() (controller.OperationResult, error) {

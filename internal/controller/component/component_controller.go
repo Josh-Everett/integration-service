@@ -51,6 +51,7 @@ func NewComponentReconciler(client client.Client, logger *logr.Logger, scheme *r
 //+kubebuilder:rbac:groups=appstudio.redhat.com,resources=components,verbs=get;list;watch;update;patch
 //+kubebuilder:rbac:groups=appstudio.redhat.com,resources=components/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=appstudio.redhat.com,resources=components/finalizers,verbs=update
+//+kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -68,10 +69,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	// TODO: remove check when old application-specific code is removed
+	// Components without an Application are the ComponentGroup model as it runs today. They get the
+	// per-component integration pipeline ServiceAccount and nothing else: the finalizer and the cleanup
+	// Snapshot belong to the Application model.
 	if component.Spec.Application == "" {
-		logger.Info("Component does not belong to an Application, skipping", "component.Name", component.Name)
-		return ctrl.Result{}, nil
+		adapter := NewAdapter(ctx, component, nil, logger, loader, r.Client)
+		return controller.ReconcileHandler([]controller.Operation{
+			adapter.EnsureComponentServiceAccountCreated,
+		})
 	}
 
 	var application *applicationapiv1alpha1.Application
@@ -96,6 +101,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	return controller.ReconcileHandler([]controller.Operation{
 		adapter.EnsureComponentHasFinalizer,
+		adapter.EnsureComponentServiceAccountCreated,
 		adapter.EnsureComponentIsCleanedUp,
 	})
 }
@@ -103,6 +109,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // AdapterInterface is an interface defining all the operations that should be defined in an Integration adapter.
 type AdapterInterface interface {
 	EnsureComponentHasFinalizer() (controller.OperationResult, error)
+	EnsureComponentServiceAccountCreated() (controller.OperationResult, error)
 	EnsureComponentIsCleanedUp() (controller.OperationResult, error)
 }
 

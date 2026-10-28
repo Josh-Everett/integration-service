@@ -114,6 +114,7 @@ rules:
 - apiGroups:
   - rbac.authorization.k8s.io
   resourceNames:
+  - its-pipeline-runner
   - konflux-integration-runner
   resources:
   - clusterroles

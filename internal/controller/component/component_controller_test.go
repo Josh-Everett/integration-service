@@ -15,6 +15,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	applicationapiv1alpha1 "github.com/konflux-ci/application-api/api/v1alpha1"
+	h "github.com/konflux-ci/integration-service/helpers"
+	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -114,7 +119,7 @@ var _ = Describe("ComponentController", Ordered, func() {
 		Expect(reflect.TypeOf(componentReconciler)).To(Equal(reflect.TypeOf(&Reconciler{})))
 	})
 
-	It("should skip Reconciliation when Component has no Application (ComponentGroup model)", func() {
+	It("creates the account and binding for a Component without an Application and adds no finalizer", func() {
 		hasCompNoApp := &applicationapiv1alpha1.Component{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "component-no-app",
@@ -133,6 +138,8 @@ var _ = Describe("ComponentController", Ordered, func() {
 			},
 		}
 		Expect(k8sClient.Create(ctx, hasCompNoApp)).Should(Succeed())
+		accountName := h.ComponentIntegrationPipelineServiceAccountName(hasCompNoApp.Name)
+		accountKey := types.NamespacedName{Name: accountName, Namespace: "default"}
 
 		noAppReq := ctrl.Request{
 			NamespacedName: types.NamespacedName{
@@ -140,10 +147,34 @@ var _ = Describe("ComponentController", Ordered, func() {
 				Name:      hasCompNoApp.Name,
 			},
 		}
+		// The reconciler reads through the manager cache, and a reconcile of a Component that has not
+		// arrived there yet is a no-op that still returns an empty result. Wait for it to be visible.
+		Eventually(func() error {
+			return k8sClient.Get(ctx, noAppReq.NamespacedName, &applicationapiv1alpha1.Component{})
+		}, time.Second*10).Should(Succeed())
+
 		result, err := componentReconciler.Reconcile(ctx, noAppReq)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(result).To(Equal(ctrl.Result{}))
 
+		sa := &corev1.ServiceAccount{}
+		rb := &rbacv1.RoleBinding{}
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, accountKey, sa)).To(Succeed())
+			g.Expect(sa.OwnerReferences).To(HaveLen(1))
+			g.Expect(sa.OwnerReferences[0].UID).To(Equal(hasCompNoApp.UID))
+			g.Expect(k8sClient.Get(ctx, accountKey, rb)).To(Succeed())
+			g.Expect(rb.OwnerReferences).To(HaveLen(1))
+			g.Expect(rb.OwnerReferences[0].UID).To(Equal(hasCompNoApp.UID))
+		}, time.Second*10).Should(Succeed())
+
+		updated := &applicationapiv1alpha1.Component{}
+		Expect(k8sClient.Get(ctx, noAppReq.NamespacedName, updated)).To(Succeed())
+		Expect(controllerutil.ContainsFinalizer(updated, h.ComponentFinalizer)).To(BeFalse())
+
+		// envtest has no garbage collector
+		Expect(k8sClient.Delete(ctx, sa)).Should(Succeed())
+		Expect(k8sClient.Delete(ctx, rb)).Should(Succeed())
 		Expect(k8sClient.Delete(ctx, hasCompNoApp)).Should(Succeed())
 	})
 
@@ -179,7 +210,4 @@ var _ = Describe("ComponentController", Ordered, func() {
 		err := setupControllerWithManager(manager, componentReconciler)
 		Expect(err).NotTo(HaveOccurred())
 	})
-
-	// STONEINTG-1799: planned reconcile behaviour; filled in by the next commit.
-	PIt("creates the account and binding for a Component with an Application, after the finalizer and before cleanup", func() {})
 })

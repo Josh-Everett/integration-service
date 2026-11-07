@@ -75,6 +75,9 @@ type Adapter struct {
 	client         client.Client
 	context        context.Context
 	status         status.StatusInterface
+	// pushSecretLinkChecked is set once ensureComponentPushSecretLinked has linked the push secret, found
+	// nothing to link, or failed for good in this reconcile pass. A retryable failure leaves it unset.
+	pushSecretLinkChecked bool
 }
 
 // NewAdapter creates and returns an Adapter instance.
@@ -1229,6 +1232,10 @@ func (a *Adapter) createIntegrationPipelineRun(integrationTestScenario *v1beta2.
 
 	pipelineRun := pipelineRunBuilder.AsPipelineRun()
 
+	if err = a.ensureComponentPushSecretLinked(pipelineRun); err != nil {
+		return nil, err
+	}
+
 	err = ctrl.SetControllerReference(a.snapshot, pipelineRun, a.client.Scheme())
 	if err != nil {
 		return nil, fmt.Errorf("failed to set snapshot %s as ControllerReference of pipelineRun: %w", a.snapshot.Name, err)
@@ -1252,6 +1259,36 @@ func (a *Adapter) createIntegrationPipelineRun(integrationTestScenario *v1beta2.
 		}
 	}
 	return pipelineRun, nil
+}
+
+// ensureComponentPushSecretLinked links the push secret of the Snapshot's component to
+// its-pipeline-<component> when pipelineRun is about to run as that account (STONEINTG-1804). Once it
+// has linked the secret, found nothing to link, or failed for good, it does nothing more in this
+// reconcile pass, so a Snapshot with several scenarios lists the ImageRepositories once. It returns an
+// error only for a failure that isRetryablePipelineRunCreationError recognizes, so that both callers
+// requeue; that failure is tried again with the next PipelineRun of the pass. Any other outcome is
+// logged and the PipelineRun is created.
+func (a *Adapter) ensureComponentPushSecretLinked(pipelineRun *tektonv1.PipelineRun) error {
+	componentName := a.snapshot.Labels[gitops.SnapshotComponentLabel]
+	if a.pushSecretLinkChecked || !gitops.IsComponentSnapshot(a.snapshot) || componentName == "" ||
+		pipelineRun.Spec.TaskRunTemplate.ServiceAccountName != h.ComponentIntegrationPipelineServiceAccountName(componentName) {
+		return nil
+	}
+
+	linked, err := h.LinkComponentPushSecrets(a.context, a.client, a.logger, a.snapshot.Namespace, componentName)
+	if isRetryablePipelineRunCreationError(err) {
+		return fmt.Errorf("failed to link the push secret of component %s: %w", componentName, err)
+	}
+	if err != nil {
+		a.logger.Error(err, "Failed to link the component's push secret to the integration pipeline ServiceAccount",
+			"component.Name", componentName)
+	} else if !linked {
+		a.logger.Info("Found no push secret to link to the integration pipeline ServiceAccount",
+			"component.Name", componentName)
+	}
+	a.pushSecretLinkChecked = true
+
+	return nil
 }
 
 // RequeueIfYoungerThanThreshold checks if the adapter's snapshot is younger than the threshold defined

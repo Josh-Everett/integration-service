@@ -22,6 +22,7 @@ import (
 	"errors"
 
 	applicationapiv1alpha1 "github.com/konflux-ci/application-api/api/v1alpha1"
+	imagerepositoryv1alpha1 "github.com/konflux-ci/image-controller/api/v1alpha1"
 	"github.com/konflux-ci/integration-service/helpers"
 	tektonconsts "github.com/konflux-ci/integration-service/tekton/consts"
 	. "github.com/onsi/ginkgo/v2"
@@ -30,8 +31,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -272,6 +275,200 @@ var _ = Describe("Helpers for the per-component integration pipeline ServiceAcco
 
 			err := helpers.EnsureIntegrationPipelineServiceAccountExists(ctx, c, log, owner)
 			Expect(err).To(MatchError(errAPI))
+		})
+	})
+
+	// These specs use the fake client for the same reason as the specs above, and because no suite
+	// installs the ImageRepository kind in its API server.
+	Context("LinkComponentPushSecrets", func() {
+		const (
+			namespace      = "default"
+			componentName  = "my-component"
+			accountName    = "its-pipeline-my-component"
+			pushSecretName = "imagerepository-for-my-app-my-component-image-push"
+		)
+
+		var (
+			scheme *runtime.Scheme
+			log    helpers.IntegrationLogger
+			key    = types.NamespacedName{Name: accountName, Namespace: namespace}
+			errAPI = errors.New("the API server said no")
+		)
+
+		account := func(secretNames ...string) *corev1.ServiceAccount {
+			sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: accountName, Namespace: namespace}}
+			for _, name := range secretNames {
+				sa.Secrets = append(sa.Secrets, corev1.ObjectReference{Name: name})
+			}
+			return sa
+		}
+
+		// imageRepository is an ImageRepository with the component label. pushSecret is the name
+		// image-controller writes to the status when it provisions; empty means not provisioned yet.
+		imageRepository := func(name, component, pushSecret string) *imagerepositoryv1alpha1.ImageRepository {
+			ir := &imagerepositoryv1alpha1.ImageRepository{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: namespace,
+					Labels:    map[string]string{tektonconsts.ImageRepositoryComponentLabel: component},
+				},
+			}
+			ir.Status.Credentials.PushSecretName = pushSecret
+			return ir
+		}
+
+		newClient := func(funcs interceptor.Funcs, objs ...client.Object) client.Client {
+			return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).WithInterceptorFuncs(funcs).Build()
+		}
+
+		secretNames := func(c client.Client) []string {
+			sa := &corev1.ServiceAccount{}
+			Expect(c.Get(ctx, key, sa)).To(Succeed())
+			names := []string{}
+			for _, ref := range sa.Secrets {
+				names = append(names, ref.Name)
+			}
+			return names
+		}
+
+		BeforeEach(func() {
+			scheme = runtime.NewScheme()
+			Expect(corev1.AddToScheme(scheme)).To(Succeed())
+			Expect(imagerepositoryv1alpha1.AddToScheme(scheme)).To(Succeed())
+			log = helpers.IntegrationLogger{Logger: buflogr.NewWithBuffer(&bytes.Buffer{})}
+		})
+
+		It("links the push secret into the secrets list and leaves the rest of the account alone", func() {
+			existing := account("user-linked-secret")
+			existing.ImagePullSecrets = []corev1.LocalObjectReference{{Name: "user-pull-secret"}}
+			c := newClient(interceptor.Funcs{}, existing, imageRepository("imagerepository-for-my-app-my-component", componentName, pushSecretName))
+
+			linked, err := helpers.LinkComponentPushSecrets(ctx, c, log, namespace, componentName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(linked).To(BeTrue())
+			Expect(secretNames(c)).To(Equal([]string{"user-linked-secret", pushSecretName}))
+
+			sa := &corev1.ServiceAccount{}
+			Expect(c.Get(ctx, key, sa)).To(Succeed())
+			Expect(sa.ImagePullSecrets).To(Equal([]corev1.LocalObjectReference{{Name: "user-pull-secret"}}))
+		})
+
+		It("changes nothing on a second call", func() {
+			c := newClient(interceptor.Funcs{}, account(), imageRepository("ir", componentName, pushSecretName))
+			_, err := helpers.LinkComponentPushSecrets(ctx, c, log, namespace, componentName)
+			Expect(err).NotTo(HaveOccurred())
+			first := &corev1.ServiceAccount{}
+			Expect(c.Get(ctx, key, first)).To(Succeed())
+
+			linked, err := helpers.LinkComponentPushSecrets(ctx, c, log, namespace, componentName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(linked).To(BeTrue())
+			second := &corev1.ServiceAccount{}
+			Expect(c.Get(ctx, key, second)).To(Succeed())
+			Expect(second.Secrets).To(HaveLen(1))
+			Expect(second.ResourceVersion).To(Equal(first.ResourceVersion))
+		})
+
+		It("links every push secret of the Component and none of another Component", func() {
+			now := metav1.Now()
+			deleting := imageRepository("ir-deleting", componentName, "ir-deleting-image-push")
+			deleting.Finalizers = []string{"appstudio.openshift.io/image-repository"}
+			deleting.DeletionTimestamp = &now
+			c := newClient(interceptor.Funcs{}, account(),
+				imageRepository("ir-one", componentName, "ir-one-image-push"),
+				imageRepository("ir-two", componentName, "ir-two-image-push"),
+				imageRepository("ir-not-provisioned", componentName, ""),
+				deleting,
+				imageRepository("ir-other", "another-component", "ir-other-image-push"))
+
+			linked, err := helpers.LinkComponentPushSecrets(ctx, c, log, namespace, componentName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(linked).To(BeTrue())
+			Expect(secretNames(c)).To(ConsistOf("ir-one-image-push", "ir-two-image-push"))
+		})
+
+		It("reports nothing to link and does not read the account when no ImageRepository has a push secret name", func() {
+			funcs := interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					return errAPI
+				},
+			}
+			c := newClient(funcs,
+				imageRepository("ir-not-provisioned", componentName, ""),
+				imageRepository("ir-other", "another-component", "ir-other-image-push"))
+
+			linked, err := helpers.LinkComponentPushSecrets(ctx, c, log, namespace, componentName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(linked).To(BeFalse())
+		})
+
+		It("reports nothing to link when the cluster does not serve the ImageRepository kind", func() {
+			funcs := interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					return &meta.NoKindMatchError{
+						GroupKind:        schema.GroupKind{Group: imagerepositoryv1alpha1.GroupVersion.Group, Kind: "ImageRepository"},
+						SearchedVersions: []string{imagerepositoryv1alpha1.GroupVersion.Version},
+					}
+				},
+			}
+
+			linked, err := helpers.LinkComponentPushSecrets(ctx, newClient(funcs, account()), log, namespace, componentName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(linked).To(BeFalse())
+		})
+
+		It("returns any other list error in a form the caller can still classify", func() {
+			funcs := interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					return apierrors.NewServiceUnavailable("the API server is busy")
+				},
+			}
+
+			linked, err := helpers.LinkComponentPushSecrets(ctx, newClient(funcs, account()), log, namespace, componentName)
+			Expect(apierrors.IsServiceUnavailable(err)).To(BeTrue())
+			Expect(linked).To(BeFalse())
+		})
+
+		It("returns NotFound when the account does not exist", func() {
+			c := newClient(interceptor.Funcs{}, imageRepository("ir", componentName, pushSecretName))
+
+			linked, err := helpers.LinkComponentPushSecrets(ctx, c, log, namespace, componentName)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			Expect(linked).To(BeFalse())
+		})
+
+		It("reads the account again and links when the update meets a conflict", func() {
+			updates := 0
+			funcs := interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					updates++
+					if updates == 1 {
+						return apierrors.NewConflict(corev1.Resource("serviceaccounts"), accountName, errAPI)
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+			}
+			c := newClient(funcs, account(), imageRepository("ir", componentName, pushSecretName))
+
+			linked, err := helpers.LinkComponentPushSecrets(ctx, c, log, namespace, componentName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(linked).To(BeTrue())
+			Expect(updates).To(Equal(2))
+			Expect(secretNames(c)).To(Equal([]string{pushSecretName}))
+		})
+
+		It("returns the update error and links nothing", func() {
+			funcs := interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					return errAPI
+				},
+			}
+			c := newClient(funcs, account(), imageRepository("ir", componentName, pushSecretName))
+
+			linked, err := helpers.LinkComponentPushSecrets(ctx, c, log, namespace, componentName)
+			Expect(err).To(MatchError(errAPI))
+			Expect(linked).To(BeFalse())
+			Expect(secretNames(c)).To(BeEmpty())
 		})
 	})
 })

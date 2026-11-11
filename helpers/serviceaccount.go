@@ -105,8 +105,10 @@ func EnsureIntegrationPipelineServiceAccountExists(ctx context.Context, adapterC
 // carries the Component's label to the secrets list of its-pipeline-<component> (STONEINTG-1804), so
 // that an integration PipelineRun running as that account can push to the component's image
 // repository. The secret's name is read from status.credentials.push-secret, which image-controller
-// writes when it provisions the ImageRepository. No Secret is read and imagePullSecrets is left as it
-// is. Nothing is unlinked: Tekton skips a listed Secret that no longer exists.
+// writes when it provisions the ImageRepository. Together with a push secret it adds
+// components-namespace-pull, the pull secret of the shared runner, which can read every repository
+// image-controller made in the namespace (STONEINTG-1800). No Secret is read and imagePullSecrets is
+// left as it is. Nothing is unlinked: Tekton skips a listed Secret that no longer exists.
 // It returns true when the account lists at least one such push secret after the call. It returns
 // false and no error when there is nothing to link: the cluster does not serve the ImageRepository
 // kind, or no ImageRepository of the Component has a push secret name. An account that does not exist
@@ -141,7 +143,7 @@ func LinkComponentPushSecrets(ctx context.Context, adapterClient client.Client, 
 			return err
 		}
 		listed := len(account.Secrets)
-		for _, name := range pushSecretNames {
+		for _, name := range append(pushSecretNames, tektonconsts.DefaultIntegrationPipelineImagePullSecretName) {
 			if !slices.ContainsFunc(account.Secrets, func(ref corev1.ObjectReference) bool { return ref.Name == name }) {
 				account.Secrets = append(account.Secrets, corev1.ObjectReference{Name: name})
 			}

@@ -350,8 +350,21 @@ var _ = Describe("Helpers for the per-component integration pipeline ServiceAcco
 			Expect(linked).To(BeTrue())
 			second := &corev1.ServiceAccount{}
 			Expect(c.Get(ctx, key, second)).To(Succeed())
-			Expect(second.Secrets).To(HaveLen(1))
+			Expect(second.Secrets).To(HaveLen(2))
 			Expect(second.ResourceVersion).To(Equal(first.ResourceVersion))
+		})
+
+		It("links components-namespace-pull next to the push secret and leaves imagePullSecrets alone", func() {
+			c := newClient(interceptor.Funcs{}, account("user-linked-secret"), imageRepository("ir", componentName, pushSecretName))
+
+			linked, err := helpers.LinkComponentPushSecrets(ctx, c, log, namespace, componentName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(linked).To(BeTrue())
+			Expect(secretNames(c)).To(Equal([]string{"user-linked-secret", pushSecretName, tektonconsts.DefaultIntegrationPipelineImagePullSecretName}))
+
+			sa := &corev1.ServiceAccount{}
+			Expect(c.Get(ctx, key, sa)).To(Succeed())
+			Expect(sa.ImagePullSecrets).To(BeEmpty())
 		})
 
 		It("reports nothing to link and does not read the account when no ImageRepository has a push secret name", func() {

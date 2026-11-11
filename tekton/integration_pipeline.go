@@ -611,6 +611,19 @@ func (r *IntegrationPipelineRun) WithDefaultServiceAccount(serviceAccountName st
 	return r
 }
 
+// WithServiceAccountFallback records on the Integration PipelineRun why it does not run as the
+// per-component ServiceAccount (STONEINTG-1800). With an empty reason it removes the annotation, which
+// may have been copied from the Snapshot or the IntegrationTestScenario.
+func (r *IntegrationPipelineRun) WithServiceAccountFallback(reason string) *IntegrationPipelineRun {
+	if reason == "" {
+		_ = gitops.DeleteOwnedAnnotation(r, consts.ServiceAccountFallbackAnnotation)
+		return r
+	}
+	_ = gitops.SetOwnedAnnotation(r, consts.ServiceAccountFallbackAnnotation, reason)
+
+	return r
+}
+
 // WithIntegrationTimeouts fetches the Integration timeouts from either the integrationTestScenario annotations or
 // the environment variables and adds them to the integration PipelineRun.
 func (r *IntegrationPipelineRun) WithIntegrationTimeouts(integrationTestScenario *v1beta2.IntegrationTestScenario, logger logr.Logger) *IntegrationPipelineRun {

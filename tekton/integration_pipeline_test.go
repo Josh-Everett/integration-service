@@ -697,6 +697,31 @@ var _ = Describe("Integration pipeline", Ordered, func() {
 			Expect(newIntegrationPipelineRun.Spec.Params[1].Value.ArrayVal).To(Equal(scenarioParams[1].Values))
 		})
 
+		It("sets the fallback annotation with the reason and removes one that was copied in", func() {
+			pipelineRun := (&tekton.IntegrationPipelineRun{}).WithServiceAccountFallback(tektonconsts.ServiceAccountFallbackAccountMissing)
+			Expect(pipelineRun.Annotations).To(HaveKeyWithValue(tektonconsts.ServiceAccountFallbackAnnotation, tektonconsts.ServiceAccountFallbackAccountMissing))
+
+			copiedIn := hasSnapshot.DeepCopy()
+			copiedIn.Annotations[tektonconsts.ServiceAccountFallbackAnnotation] = tektonconsts.ServiceAccountFallbackNoPushSecret
+			pipelineRun = (&tekton.IntegrationPipelineRun{}).WithSnapshot(copiedIn, integrationTestScenarioGit)
+			Expect(pipelineRun.Annotations).To(HaveKey(tektonconsts.ServiceAccountFallbackAnnotation))
+			Expect(pipelineRun.WithServiceAccountFallback("").Annotations).NotTo(HaveKey(tektonconsts.ServiceAccountFallbackAnnotation))
+		})
+
+		It("writes the fallback annotation in the new style on a new-style Integration PipelineRun", func() {
+			fallbackAnnotation := keys.Test("service-account-fallback")
+			Expect(fallbackAnnotation.Old).To(Equal(tektonconsts.ServiceAccountFallbackAnnotation))
+			pipelineRun := &tekton.IntegrationPipelineRun{}
+			pipelineRun.Labels = map[string]string{keys.SnapshotName().New: hasSnapshot.Name}
+
+			pipelineRun.WithServiceAccountFallback(tektonconsts.ServiceAccountFallbackNoPushSecret)
+			Expect(pipelineRun.Annotations).To(HaveKeyWithValue(fallbackAnnotation.New, tektonconsts.ServiceAccountFallbackNoPushSecret))
+			Expect(pipelineRun.Annotations).NotTo(HaveKey(fallbackAnnotation.Old))
+
+			pipelineRun.WithServiceAccountFallback("")
+			Expect(pipelineRun.Annotations).NotTo(HaveKey(fallbackAnnotation.New))
+		})
+
 	})
 
 	Context("When managing a new pipelineRun from a bundle-based IntegrationTestScenario", func() {

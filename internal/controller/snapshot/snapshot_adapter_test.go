@@ -46,6 +46,7 @@ import (
 	konfluxv1beta2 "github.com/konflux-ci/integration-service/api/konflux/v1beta2"
 	"github.com/konflux-ci/integration-service/api/v1beta2"
 	"github.com/konflux-ci/integration-service/loader"
+	"github.com/konflux-ci/integration-service/pkg/keys"
 	"github.com/konflux-ci/integration-service/pkg/tracing"
 	"github.com/konflux-ci/integration-service/status"
 	tekton "github.com/konflux-ci/integration-service/tekton"
@@ -1475,7 +1476,7 @@ var _ = Describe("Snapshot Adapter", Ordered, func() {
 			Expect(found).To(BeFalse())
 		})
 
-		It("ensures serviceAccount is generated correctly for the Integration test PLR", func() {
+		It("ensures the Integration test PLR falls back to the shared runner when no push secret can be linked", func() {
 			serviceAccountName := tektonconsts.DefaultIntegrationPipelineServiceAccount
 
 			pipelineRun, err := adapter.createIntegrationPipelineRun(integrationTestScenario)
@@ -1483,6 +1484,7 @@ var _ = Describe("Snapshot Adapter", Ordered, func() {
 			Expect(pipelineRun).ToNot(BeNil())
 
 			Expect(pipelineRun.Spec.TaskRunTemplate.ServiceAccountName).To(Equal(serviceAccountName))
+			Expect(pipelineRun.Annotations).To(HaveKeyWithValue(tektonconsts.ServiceAccountFallbackAnnotation, tektonconsts.ServiceAccountFallbackNoPushSecret))
 		})
 
 		Context("When the component's push secret is linked before the PipelineRun is created", func() {
@@ -1538,13 +1540,6 @@ var _ = Describe("Snapshot Adapter", Ordered, func() {
 				return ir
 			}
 
-			// pipelineRunAs is an integration PipelineRun that is about to be created with the given account.
-			pipelineRunAs := func(serviceAccountName string) *tektonv1.PipelineRun {
-				pipelineRun := &tektonv1.PipelineRun{}
-				pipelineRun.Spec.TaskRunTemplate.ServiceAccountName = serviceAccountName
-				return pipelineRun
-			}
-
 			linkedSecrets := func(linkAdapter *Adapter) []corev1.ObjectReference {
 				sa := &corev1.ServiceAccount{}
 				Expect(linkAdapter.client.Get(ctx, types.NamespacedName{Name: accountName, Namespace: "default"}, sa)).To(Succeed())
@@ -1557,42 +1552,145 @@ var _ = Describe("Snapshot Adapter", Ordered, func() {
 				lists = 0
 			})
 
-			It("links the push secret when the PipelineRun runs as the component's account, once per pass", func() {
+			It("links the push secret once per pass and reports no fallback", func() {
 				linkAdapter := newLinkAdapter(hasCGSnapshot, nil, account(), imageRepository())
 
-				Expect(linkAdapter.ensureComponentPushSecretLinked(pipelineRunAs(accountName))).To(Succeed())
-				Expect(linkAdapter.ensureComponentPushSecretLinked(pipelineRunAs(accountName))).To(Succeed())
+				for range 2 {
+					reason, err := linkAdapter.ensureComponentPushSecretLinked(componentName)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(reason).To(BeEmpty())
+				}
 
-				Expect(linkedSecrets(linkAdapter)).To(Equal([]corev1.ObjectReference{{Name: pushSecretName}}))
+				Expect(linkedSecrets(linkAdapter)).To(Equal([]corev1.ObjectReference{
+					{Name: pushSecretName}, {Name: tektonconsts.DefaultIntegrationPipelineImagePullSecretName},
+				}))
 				Expect(lists).To(Equal(1))
 			})
 
-			It("logs that there is nothing to link when the Component has no push secret", func() {
+			It("reports no-push-secret when the Component has no push secret", func() {
 				linkAdapter := newLinkAdapter(hasCGSnapshot, nil, account())
 
-				Expect(linkAdapter.ensureComponentPushSecretLinked(pipelineRunAs(accountName))).To(Succeed())
+				reason, err := linkAdapter.ensureComponentPushSecretLinked(componentName)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(reason).To(Equal(tektonconsts.ServiceAccountFallbackNoPushSecret))
 				Expect(linkedSecrets(linkAdapter)).To(BeEmpty())
 				Expect(buf.String()).To(ContainSubstring("Found no push secret to link"))
 			})
 
-			It("logs a failure that is not retryable and returns no error", func() {
-				linkAdapter := newLinkAdapter(hasCGSnapshot, nil, imageRepository())
+			It("reports no-push-secret and logs the error when the link fails for good", func() {
+				forbidden := errors.NewForbidden(corev1.Resource("imagerepositories"), "", nil)
+				linkAdapter := newLinkAdapter(hasCGSnapshot, forbidden, account(), imageRepository())
 
-				Expect(linkAdapter.ensureComponentPushSecretLinked(pipelineRunAs(accountName))).To(Succeed())
+				reason, err := linkAdapter.ensureComponentPushSecretLinked(componentName)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(reason).To(Equal(tektonconsts.ServiceAccountFallbackNoPushSecret))
 				Expect(buf.String()).To(ContainSubstring("Failed to link the component's push secret"))
-				Expect(linkAdapter.pushSecretLinkChecked).To(BeTrue())
 			})
 
 			It("returns a retryable failure and tries again on the next call", func() {
 				linkAdapter := newLinkAdapter(hasCGSnapshot, errors.NewServiceUnavailable("the API server is busy"), account(), imageRepository())
 
-				err := linkAdapter.ensureComponentPushSecretLinked(pipelineRunAs(accountName))
+				_, err := linkAdapter.ensureComponentPushSecretLinked(componentName)
 				Expect(isRetryablePipelineRunCreationError(err)).To(BeTrue())
 				Expect(linkAdapter.pushSecretLinkChecked).To(BeFalse())
-				Expect(linkAdapter.ensureComponentPushSecretLinked(pipelineRunAs(accountName))).NotTo(Succeed())
+				_, err = linkAdapter.ensureComponentPushSecretLinked(componentName)
+				Expect(err).To(HaveOccurred())
 				Expect(lists).To(Equal(2))
 			})
 
+			It("links and lists nothing when the PipelineRun definition names another account", func() {
+				linkAdapter := newLinkAdapter(hasCGSnapshot, nil, account(), imageRepository())
+
+				_, reason, err := linkAdapter.selectPipelineServiceAccount("my-own-account")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(reason).To(BeEmpty())
+				Expect(lists).To(Equal(0))
+			})
+
+			It("keeps its-pipeline-<component> named in the PipelineRun definition when nothing is linked", func() {
+				linkAdapter := newLinkAdapter(hasCGSnapshot, nil, account())
+
+				serviceAccountName, reason, err := linkAdapter.selectPipelineServiceAccount(accountName)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(serviceAccountName).To(Equal(accountName))
+				Expect(reason).To(BeEmpty())
+			})
+
+			It("uses the runner for a Snapshot that is not a component Snapshot or has no component label", func() {
+				groupSnapshot := hasCGSnapshot.DeepCopy()
+				groupSnapshot.Labels[gitops.SnapshotTypeLabel] = gitops.SnapshotGroupType
+				unlabelledSnapshot := hasCGSnapshot.DeepCopy()
+				delete(unlabelledSnapshot.Labels, gitops.SnapshotComponentLabel)
+
+				for _, snapshot := range []*applicationapiv1alpha1.Snapshot{groupSnapshot, unlabelledSnapshot} {
+					linkAdapter := newLinkAdapter(snapshot, nil, account(), imageRepository())
+
+					serviceAccountName, reason, err := linkAdapter.selectPipelineServiceAccount("")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(serviceAccountName).To(Equal(tektonconsts.DefaultIntegrationPipelineServiceAccount))
+					Expect(reason).To(BeEmpty())
+				}
+				Expect(lists).To(Equal(0))
+			})
+
+			It("selects its-pipeline-<component> for a new-style component Snapshot", func() {
+				newStyleSnapshot := hasCGSnapshot.DeepCopy()
+				newStyleSnapshot.Labels = map[string]string{
+					keys.Test("type").New:     gitops.SnapshotComponentType,
+					keys.BuildComponent().New: componentName,
+				}
+				linkAdapter := newLinkAdapter(newStyleSnapshot, nil, account(), imageRepository())
+
+				serviceAccountName, reason, err := linkAdapter.selectPipelineServiceAccount("")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(serviceAccountName).To(Equal(accountName))
+				Expect(reason).To(BeEmpty())
+			})
+
+			It("runs a component Snapshot's PipelineRun as its-pipeline-<component>", func() {
+				linkAdapter := newLinkAdapter(hasCGSnapshot, nil, account(), imageRepository())
+
+				pipelineRun, err := linkAdapter.createIntegrationPipelineRun(integrationTestScenario)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pipelineRun.Spec.TaskRunTemplate.ServiceAccountName).To(Equal(accountName))
+				Expect(pipelineRun.Annotations).NotTo(HaveKey(tektonconsts.ServiceAccountFallbackAnnotation))
+				Expect(linkedSecrets(linkAdapter)).To(ContainElement(corev1.ObjectReference{Name: pushSecretName}))
+			})
+
+			It("falls back to the runner with the reason in an annotation when the account cannot be used", func() {
+				linkAdapter := newLinkAdapter(hasCGSnapshot, nil, imageRepository())
+
+				pipelineRun, err := linkAdapter.createIntegrationPipelineRun(integrationTestScenario)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pipelineRun.Spec.TaskRunTemplate.ServiceAccountName).To(Equal(tektonconsts.DefaultIntegrationPipelineServiceAccount))
+				Expect(pipelineRun.Annotations).To(HaveKeyWithValue(tektonconsts.ServiceAccountFallbackAnnotation, tektonconsts.ServiceAccountFallbackAccountMissing))
+			})
+
+			It("creates no PipelineRun on a retryable failure", func() {
+				linkAdapter := newLinkAdapter(hasCGSnapshot, errors.NewServiceUnavailable("the API server is busy"), account(), imageRepository())
+
+				pipelineRun, err := linkAdapter.createIntegrationPipelineRun(integrationTestScenario)
+				Expect(isRetryablePipelineRunCreationError(err)).To(BeTrue())
+				Expect(pipelineRun).To(BeNil())
+
+				pipelineRuns := &tektonv1.PipelineRunList{}
+				Expect(linkAdapter.client.List(ctx, pipelineRuns)).To(Succeed())
+				Expect(pipelineRuns.Items).To(BeEmpty())
+			})
+
+			It("lists the ImageRepositories once for two scenarios and gives both runs the same account", func() {
+				linkAdapter := newLinkAdapter(hasCGSnapshot, nil, account())
+				secondScenario := integrationTestScenario.DeepCopy()
+				secondScenario.Name = "example-pass-2"
+
+				for _, scenario := range []*v1beta2.IntegrationTestScenario{integrationTestScenario, secondScenario} {
+					pipelineRun, err := linkAdapter.createIntegrationPipelineRun(scenario)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(pipelineRun.Spec.TaskRunTemplate.ServiceAccountName).To(Equal(tektonconsts.DefaultIntegrationPipelineServiceAccount))
+					Expect(pipelineRun.Annotations).To(HaveKeyWithValue(tektonconsts.ServiceAccountFallbackAnnotation, tektonconsts.ServiceAccountFallbackNoPushSecret))
+				}
+				Expect(lists).To(Equal(1))
+			})
 		})
 
 		When("snapshot is created", func() {

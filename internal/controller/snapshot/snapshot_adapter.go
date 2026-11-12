@@ -1230,6 +1230,7 @@ func (a *Adapter) createIntegrationPipelineRun(integrationTestScenario *v1beta2.
 		WithDefaultServiceAccount(serviceAccountName).
 		WithServiceAccountFallback(fallbackReason).
 		WithExtraParams(integrationTestScenario.Spec.Params).
+		WithComponentImage(a.snapshot, a.logger.Logger).
 		WithFinalizer(h.IntegrationPipelineRunFinalizer).
 		WithIntegrationTimeouts(integrationTestScenario, a.logger.Logger)
 

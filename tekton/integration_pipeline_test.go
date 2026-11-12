@@ -722,6 +722,88 @@ var _ = Describe("Integration pipeline", Ordered, func() {
 			Expect(pipelineRun.Annotations).NotTo(HaveKey(fallbackAnnotation.New))
 		})
 
+		Context("When adding the component image params", func() {
+			const digest = "sha256:841328df1b9f8c4087adbdcfec6cc99ac8308805dea83f6d415d6fb8d40227c1"
+
+			var (
+				buf bytes.Buffer
+				log = buflogr.NewWithBuffer(&buf)
+			)
+
+			// withImage is hasSnapshot with the given containerImage for its component.
+			withImage := func(image string) *applicationapiv1alpha1.Snapshot {
+				snapshot := hasSnapshot.DeepCopy()
+				snapshot.Spec.Components[0].ContainerImage = image
+				return snapshot
+			}
+
+			stringParam := func(value string) tektonv1.ParamValue {
+				return tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: value}
+			}
+
+			It("adds image-url and image-digest for a component Snapshot, without the tag", func() {
+				pipelineRun := (&tekton.IntegrationPipelineRun{}).WithComponentImage(withImage("quay.io/org/ns/comp:tag@"+digest), log)
+				Expect(pipelineRun.Spec.Params).To(Equal(tektonv1.Params{
+					{Name: tektonconsts.ComponentImageUrlParamName, Value: stringParam("quay.io/org/ns/comp")},
+					{Name: tektonconsts.ComponentImageDigestParamName, Value: stringParam(digest)},
+				}))
+			})
+
+			It("matches the component by name and version", func() {
+				snapshot := withImage("quay.io/org/ns/comp@" + digest)
+				snapshot.Spec.Components[0].Version = "v1"
+				snapshot.Spec.Components = append(snapshot.Spec.Components, applicationapiv1alpha1.SnapshotComponent{
+					Name: "component-sample", Version: "v2", ContainerImage: "quay.io/org/ns/comp-v2@" + digest,
+				})
+				snapshot.Labels[gitops.SnapshotComponentVersionLabel] = "v2"
+
+				pipelineRun := (&tekton.IntegrationPipelineRun{}).WithComponentImage(snapshot, log)
+				Expect(pipelineRun.Spec.Params[0].Value.StringVal).To(Equal("quay.io/org/ns/comp-v2"))
+			})
+
+			It("reads the component from a new-style Snapshot", func() {
+				snapshot := withImage("quay.io/org/ns/comp@" + digest)
+				snapshot.Labels = map[string]string{
+					keys.Test("type").New:     gitops.SnapshotComponentType,
+					keys.BuildComponent().New: "component-sample",
+				}
+
+				pipelineRun := (&tekton.IntegrationPipelineRun{}).WithComponentImage(snapshot, log)
+				Expect(pipelineRun.Spec.Params).To(HaveLen(2))
+			})
+
+			It("keeps a param the scenario already set, whatever its case", func() {
+				pipelineRun := (&tekton.IntegrationPipelineRun{}).
+					WithExtraParam("IMAGE-URL", stringParam("the scenario's own")).
+					WithComponentImage(withImage("quay.io/org/ns/comp@"+digest), log)
+				Expect(pipelineRun.Spec.Params).To(Equal(tektonv1.Params{
+					{Name: "IMAGE-URL", Value: stringParam("the scenario's own")},
+					{Name: tektonconsts.ComponentImageDigestParamName, Value: stringParam(digest)},
+				}))
+			})
+
+			It("adds nothing for a Snapshot that is not a component Snapshot or has no component label", func() {
+				groupSnapshot := withImage("quay.io/org/ns/comp@" + digest)
+				groupSnapshot.Labels[gitops.SnapshotTypeLabel] = gitops.SnapshotGroupType
+				unlabelledSnapshot := withImage("quay.io/org/ns/comp@" + digest)
+				delete(unlabelledSnapshot.Labels, gitops.SnapshotComponentLabel)
+
+				for _, snapshot := range []*applicationapiv1alpha1.Snapshot{groupSnapshot, unlabelledSnapshot} {
+					Expect((&tekton.IntegrationPipelineRun{}).WithComponentImage(snapshot, log).Spec.Params).To(BeEmpty())
+				}
+			})
+
+			It("adds nothing when the component is not in the Snapshot or its image has no digest", func() {
+				notInSnapshot := withImage("quay.io/org/ns/comp@" + digest)
+				notInSnapshot.Spec.Components[0].Name = "another-component"
+
+				for _, snapshot := range []*applicationapiv1alpha1.Snapshot{notInSnapshot, withImage("quay.io/org/ns/comp:tag")} {
+					Expect((&tekton.IntegrationPipelineRun{}).WithComponentImage(snapshot, log).Spec.Params).To(BeEmpty())
+				}
+				Expect(buf.String()).To(ContainSubstring("Not adding the component image params"))
+			})
+		})
+
 	})
 
 	Context("When managing a new pipelineRun from a bundle-based IntegrationTestScenario", func() {

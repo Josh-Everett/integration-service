@@ -1647,14 +1647,20 @@ var _ = Describe("Snapshot Adapter", Ordered, func() {
 				Expect(reason).To(BeEmpty())
 			})
 
-			It("runs a component Snapshot's PipelineRun as its-pipeline-<component>", func() {
-				linkAdapter := newLinkAdapter(hasCGSnapshot, nil, account(), imageRepository())
+			It("runs a component Snapshot's PipelineRun as its-pipeline-<component> with the component image params", func() {
+				snapshot := hasCGSnapshot.DeepCopy()
+				snapshot.Spec.Components[0].ContainerImage = sample_image + "@" + sampleDigest
+				linkAdapter := newLinkAdapter(snapshot, nil, account(), imageRepository())
 
 				pipelineRun, err := linkAdapter.createIntegrationPipelineRun(integrationTestScenario)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(pipelineRun.Spec.TaskRunTemplate.ServiceAccountName).To(Equal(accountName))
 				Expect(pipelineRun.Annotations).NotTo(HaveKey(tektonconsts.ServiceAccountFallbackAnnotation))
 				Expect(linkedSecrets(linkAdapter)).To(ContainElement(corev1.ObjectReference{Name: pushSecretName}))
+				Expect(pipelineRun.Spec.Params).To(ContainElements(
+					tektonv1.Param{Name: tektonconsts.ComponentImageUrlParamName, Value: tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: sample_image}},
+					tektonv1.Param{Name: tektonconsts.ComponentImageDigestParamName, Value: tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: sampleDigest}},
+				))
 			})
 
 			It("falls back to the runner with the reason in an annotation when the account cannot be used", func() {

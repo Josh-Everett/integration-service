@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"os"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/ghodss/yaml" // used instead of gopkg.in/yaml.v3 because it treats json tags as yaml tags
 	"github.com/go-logr/logr"
+	"github.com/google/go-containerregistry/pkg/name"
 	applicationapiv1alpha1 "github.com/konflux-ci/application-api/api/v1alpha1"
 	konfluxv1beta2 "github.com/konflux-ci/integration-service/api/konflux/v1beta2"
 	"github.com/konflux-ci/integration-service/api/v1beta2"
@@ -622,6 +624,39 @@ func (r *IntegrationPipelineRun) WithServiceAccountFallback(reason string) *Inte
 	_ = gitops.SetOwnedAnnotation(r, consts.ServiceAccountFallbackAnnotation, reason)
 
 	return r
+}
+
+// WithComponentImage adds the image-url and image-digest params to the Integration PipelineRun of a
+// component Snapshot (STONEINTG-1800): the repository and the digest of the containerImage that the
+// Snapshot holds for the component it was created for. A param that the PipelineRun already has, from
+// the IntegrationTestScenario or from its own definition, is kept. Nothing is added for another type
+// of Snapshot or when the Snapshot holds no image with a digest for the component.
+func (r *IntegrationPipelineRun) WithComponentImage(snapshot *applicationapiv1alpha1.Snapshot, logger logr.Logger) *IntegrationPipelineRun {
+	componentName, _ := keys.GetLabel(snapshot, keys.BuildComponent())
+	if !gitops.IsComponentSnapshot(snapshot) || componentName == "" {
+		return r
+	}
+
+	component := gitops.FindMatchingSnapshotComponent(snapshot, componentName, snapshot.Labels[gitops.SnapshotComponentVersionLabel])
+	digest, err := name.NewDigest(component.ContainerImage)
+	if err != nil {
+		logger.Info("Not adding the component image params: the Snapshot holds no image with a digest for the component",
+			"snapshot.Name", snapshot.Name, "component.Name", componentName, "reason", err.Error())
+		return r
+	}
+
+	return r.withParamIfAbsent(consts.ComponentImageUrlParamName, digest.Context().Name()).
+		withParamIfAbsent(consts.ComponentImageDigestParamName, digest.DigestStr())
+}
+
+// withParamIfAbsent adds a string param unless the Integration PipelineRun already has a param of that
+// name. Tekton rejects a PipelineRun with two params of the same name, compared without case.
+func (r *IntegrationPipelineRun) withParamIfAbsent(paramName, value string) *IntegrationPipelineRun {
+	if slices.ContainsFunc(r.Spec.Params, func(param tektonv1.Param) bool { return strings.EqualFold(param.Name, paramName) }) {
+		return r
+	}
+
+	return r.WithExtraParam(paramName, tektonv1.ParamValue{Type: tektonv1.ParamTypeString, StringVal: value})
 }
 
 // WithIntegrationTimeouts fetches the Integration timeouts from either the integrationTestScenario annotations or

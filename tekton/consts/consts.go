@@ -114,6 +114,14 @@ const (
 	// whose push secret could not be linked to its-pipeline-<component>.
 	ServiceAccountFallbackNoPushSecret = "no-push-secret"
 
+	// ComponentImageUrlParamName is the param that carries the image repository of the component a
+	// component Snapshot was created for. A param of this name that the PipelineRun already has is kept.
+	ComponentImageUrlParamName = "image-url"
+
+	// ComponentImageDigestParamName is the param that carries the image digest of the component a
+	// component Snapshot was created for. A param of this name that the PipelineRun already has is kept.
+	ComponentImageDigestParamName = "image-digest"
+
 	/*
 	 * Build PipelineConstants
 	 */

@@ -31,6 +31,7 @@ Monitors Snapshot CRs and manages the following:
 - Ensures that all Integration pipeline runs associated with the Snapshot and IntegrationTestScenarios are started
 - Ensures that any requested re-runs of integration testing pipelines are triggered
 - Runs the integration pipeline runs of a component Snapshot as the component's `its-pipeline-<component>` ServiceAccount, unless the scenario's own PipelineRun definition names a ServiceAccount. Before it creates such a run it links the component repository's push secret and `components-namespace-pull` into the account's `secrets` list. When the account does not exist or no push secret could be linked, the run uses `konflux-integration-runner` and carries the annotation `test.appstudio.openshift.io/service-account-fallback` with the reason, `account-missing` or `no-push-secret`
+- Adds the params `image-url` (the repository, without tag or digest) and `image-digest` of the Snapshot's component to the integration pipeline runs of a component Snapshot. A param of the same name that the scenario sets is kept
 - Creates automated Releases for Snapshots that pass all required integration tests if so configured
 - Creates PR Group Snapshots if necessary
 - Manages override Snapshots and uses them to reset the Global Candidate List(s) for Components
